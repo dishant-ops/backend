@@ -3,6 +3,7 @@ import { ApiError } from "../utils/ApiError.js";
 import { User } from "../models/user.model.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+import jwt from "jsonwebtoken";
 
 const generateAccessAndRefreshTokens = async(userId) => {
     try {
@@ -22,12 +23,12 @@ const generateAccessAndRefreshTokens = async(userId) => {
 const registerUser = asyncHandler(async (req, res) => {
     const { fullName, email, username, password } = req.body;
 
-    // 1️⃣ Validate required fields
+    // 1 Validate required fields
     if ([fullName, email, username, password].some((field) => field?.trim() === "")) {
         throw new ApiError(400, "All fields are required");
     }
 
-    // 2️⃣ Check if user already exists
+    // 2 Check if user already exists
     const existedUser = await User.findOne({
         $or: [{ username }, { email }]
     });
@@ -41,12 +42,12 @@ const registerUser = asyncHandler(async (req, res) => {
     const avatarLocalPath = req.files?.avatar?.[0]?.path;
     const coverImageLocalPath = req.files?.coverImage?.[0]?.path;
 
-    // 3️⃣ Validate avatar
+    // 3 Validate avatar
     if (!avatarLocalPath) {
         throw new ApiError(400, "Avatar file is required");
     }
 
-    // 4️⃣ Upload files to Cloudinary safely
+    // 4 Upload files to Cloudinary safely
     const avatar = await uploadOnCloudinary(avatarLocalPath, "avatars");
     const coverImage = coverImageLocalPath
         ? await uploadOnCloudinary(coverImageLocalPath, "coverImages")
@@ -56,7 +57,7 @@ const registerUser = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Avatar upload failed");
     }
 
-    // 5️⃣ Create user in DB
+    // 5 Create user in DB
     const user = await User.create({
         fullName,
         avatar: avatar.secure_url || avatar.url, // Cloudinary returns secure_url
@@ -66,7 +67,7 @@ const registerUser = asyncHandler(async (req, res) => {
         username: username.toLowerCase()
     });
 
-    // 6️⃣ Return user without sensitive fields
+    // 6 Return user without sensitive fields
     const createdUser = await User.findById(user._id).select("-password -refreshToken");
 
     if (!createdUser) {
@@ -81,7 +82,7 @@ const registerUser = asyncHandler(async (req, res) => {
 const loginUser = asyncHandler(async (req, res) => {
     const {email, username, password} = req.body;
 
-    if(!username || !email) {
+    if(!(username || email)) {
         throw new ApiError(400, "username or email is required")
     }
 
@@ -147,4 +148,47 @@ const logoutUser = asyncHandler(async(req, res) => {
     .json(new ApiResponse(200, {}, "User logged out"))
 })
 
-export { registerUser, loginUser, logoutUser};
+const refreshAccessToken = asyncHandler(async(req, res) => {
+    const incomingRefreshToken = req.cookies.refreshToken || req.body.refreshToken
+
+    if(!incomingRefreshToken) {
+        throw new ApiError(401, "unauthorized request")
+    }
+
+    try {
+        const decodedToken = jwt.verify(
+            incomingRefreshToken, process.env.REFRESH_TOKEN_SECRET
+        )
+    
+        const user = await User.findById(decodedToken?._id)
+    
+        if(!user) {
+            throw new ApiError(401, "Invalid refresh token")
+        }
+    
+        if(incomingRefreshToken !== user?.refreshToken) {
+            throw new ApiError(401, "Refresh token is expired or used")
+        }
+    
+        const options = {
+            httpOnly: true,
+            secure: true
+        }
+    
+        const {accessToken, newrefreshToken} = await generateAccessAndRefreshTokens(user._id)
+    
+        return res
+        .status(200)
+        .cookie("accessToken", accessToken, options)
+        .cookie("refreshToken", newrefreshToken, options)
+        .json(
+            new ApiResponse(201, {accessToken, refreshToken: newrefreshToken},
+                "Access token Refreshed"
+            )
+        )
+    } catch (error) {
+        throw new ApiError(401, error?.message || "Invalid refresh token")
+    }
+})
+
+export { registerUser, loginUser, logoutUser, refreshAccessToken};
